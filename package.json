@@ -34,7 +34,8 @@
     "locale/*.json",
     "icon.svg",
     "cordis.patch.yml",
-    "test/"
+    "test/",
+    "README.zh-CN.md"
   ],
   "dsh": {
     "manifestVersion": 1,

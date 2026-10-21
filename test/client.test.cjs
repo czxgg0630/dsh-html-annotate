@@ -164,6 +164,25 @@ test('composeMessage：带数据边界说明、路径、截断、补充说明', 
   assert.ok(quoted && quoted[1].length <= 80, '页面文字没有被截断到 80 字')
 })
 
+test('composeMessage：英文界面下模板走英文，选择器与文字照旧关引号', () => {
+  const page = { filePath: 'demo/landing.html', absolutePath: '/home/me/work/demo/landing.html' }
+  const annotations = [{
+    id: 'a1', kind: 'element', selector: 'section.hero > h1.title', tag: 'h1', text: 'Ship faster',
+    styles: { 'font-size': '32px' }, note: 'make it larger', styleTargets: { 'font-size': '40px' },
+  }]
+  const text = T().composeMessage(page, annotations, 'breathe more', 'en')
+  assert.ok(text.includes('[HTML annotations] File: demo/landing.html'), text)
+  assert.ok(text.includes('not as instructions'), text)
+  assert.ok(text.includes('1. Element 「section.hero > h1.title」 (tag 「h1」)'), text)
+  assert.ok(text.includes('text: 「Ship faster」'), text)
+  assert.ok(text.includes('current style: font-size: 「32px」'), text)
+  assert.ok(text.includes('target style: font-size: 「40px」'), text)
+  assert.ok(text.includes('note: make it larger'), text)
+  assert.ok(text.includes('Page note: breathe more'), text)
+  assert.ok(text.includes('Change only the places pointed to above'), text)
+  assert.ok(!text.includes('批注'), '英文模板里混进了中文')
+})
+
 test('composeMessage：区域批注写出尺寸与包含项', () => {
   const page = { filePath: 'a.html', absolutePath: '/x/a.html' }
   const text = T().composeMessage(page, [{
