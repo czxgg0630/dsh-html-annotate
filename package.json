@@ -1,0 +1,60 @@
+{
+  "name": "dsh-html-annotate",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "type": "module",
+  "description": "右侧栏 HTML 批注预览：点选元素或框选区域写批注，直接发进当前会话让 AI 改",
+  "keywords": [
+    "dsh-plugin",
+    "annotation",
+    "html-preview",
+    "sidebar"
+  ],
+  "author": "czxgg0630",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/czxgg0630/dsh-html-annotate.git"
+  },
+  "homepage": "https://github.com/czxgg0630/dsh-html-annotate#readme",
+  "bugs": {
+    "url": "https://github.com/czxgg0630/dsh-html-annotate/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon.svg": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "test/"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-api-workspace-files",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "icon": "./icon.svg",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0-0 <0.3.0-0"
+  },
+  "license": "MIT"
+}
