@@ -421,3 +421,43 @@ test('mergeDraft：没有草稿返回原列表，编辑态替换原条、草稿�
   const fresh = { id: 'd2', kind: 'element', note: '另', styleTargets: {}, items: base.items, rect: { x: 0, y: 0, width: 1, height: 1 } }
   assert.strictEqual(api.mergeDraft(list, fresh).length, 2)
 })
+
+test('mimeOf：按扩展名给 MIME，认不出的返回空串', () => {
+  const api = T()
+  assert.strictEqual(api.mimeOf('img/logo.png?v=2'), 'image/png')
+  assert.strictEqual(api.mimeOf('fonts/x.woff2'), 'font/woff2')
+  assert.strictEqual(api.mimeOf('page.html'), '')
+  assert.strictEqual(api.mimeOf('noext'), '')
+})
+
+test('toDataUrl：字节转 base64 data URL', () => {
+  const api = T()
+  assert.strictEqual(api.toDataUrl(new Uint8Array([104, 105]), 'text/plain'), 'data:text/plain;base64,aGk=')
+})
+
+test('inlineCss：@import 就地展开，url() 换 data URL，读不到的保留原样并记账', async () => {
+  const api = T()
+  const stats = { count: 0, bytes: 0, failed: [] }
+  const readers = {
+    stats,
+    readCss: async (ref) => {
+      if (ref === 'base.css') return { text: '.base{color:red}', absolutePath: '/any/base.css' }
+      throw new Error('missing')
+    },
+    readDataUrl: async (ref) => {
+      if (ref === 'img/bg.png') return 'data:image/png;base64,AAAA'
+      if (ref === 'img/gone.png') throw new Error('gone')
+      return ''
+    },
+  }
+  const out = await api.inlineCss(
+    '@import "base.css";\na{background:url("img/bg.png")}\nb{background:url(img/gone.png)}',
+    '/any/style.css',
+    readers,
+    0,
+  )
+  assert.ok(out.includes('.base{color:red}'), '@import 应展开')
+  assert.ok(out.includes('url("data:image/png;base64,AAAA")'), 'url() 应换 data URL')
+  assert.ok(out.includes('url(img/gone.png)'), '读不到的 url 保留原样')
+  assert.strictEqual(stats.failed.length, 1)
+})

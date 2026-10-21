@@ -84,6 +84,7 @@ window.__ModuleLoader__.load({
         'panel.head': '批注 · {n} 条',
         'send': '发送',
         'asset.inner': '{n} 个内联资源',
+        'asset.media': '{n} 个图片/字体已转内联',
         'asset.over': '共 {total} 个，超出上限',
         'asset.failed': '{n} 个读失败',
         'send.failedDetail': '发送失败：{detail}',
@@ -159,6 +160,7 @@ window.__ModuleLoader__.load({
         'panel.head': 'Annotations · {n}',
         'send': 'Send',
         'asset.inner': '{n} linked assets',
+        'asset.media': '{n} images/fonts inlined',
         'asset.over': '{total} total, over the limit',
         'asset.failed': '{n} read failed',
         'send.failedDetail': 'Failed to send: {detail}',
@@ -198,6 +200,10 @@ window.__ModuleLoader__.load({
     }
 
     const MAX_ASSETS = 24
+    /** 相对图片/字体转 data URL 的上限：单个 4 MiB、总量 12 MiB、最多 32 个。 */
+    const MAX_DATA_ASSETS = 32
+    const MAX_DATA_BYTES = 4 * 1024 * 1024
+    const MAX_DATA_TOTAL = 12 * 1024 * 1024
 
     /** apply 时填好的能力句柄：读文件与找会话服务。 */
     const api = {
@@ -306,6 +312,58 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 按字节读一个相对资源，读不到就抛错（调用方决定是否忽略）。 */
+    async function readBinary(remote, sessionId, path, options, signal) {
+      const result = await remote.readBytes(sessionId, path, options ?? {}, signal)
+      if (!result || result.ok !== true) {
+        const message = result && result.error ? result.error.message : T('read.failed')
+        throw new Error(message)
+      }
+      return { bytes: toBytes(result.value.data), absolutePath: result.value.absolutePath }
+    }
+
+    /** 扩展名 → MIME。认不出来的一律不转（比如 .html 不该当图片内联）。 */
+    const MIME_BY_EXT = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+      avif: 'image/avif',
+      svg: 'image/svg+xml',
+      ico: 'image/x-icon',
+      bmp: 'image/bmp',
+      woff: 'font/woff',
+      woff2: 'font/woff2',
+      ttf: 'font/ttf',
+      otf: 'font/otf',
+      eot: 'application/vnd.ms-fontobject',
+    }
+
+    function mimeOf(ref) {
+      const clean = assetPath(String(ref || '').trim())
+      const dot = clean.lastIndexOf('.')
+      if (dot === -1) return ''
+      return MIME_BY_EXT[clean.slice(dot + 1).toLowerCase()] || ''
+    }
+
+    function toBase64(bytes) {
+      let out = ''
+      const chunk = 0x8000
+      for (let index = 0; index < bytes.length; index += chunk) {
+        out += String.fromCharCode.apply(null, bytes.subarray(index, index + chunk))
+      }
+      return btoa(out)
+    }
+
+    function toDataUrl(bytes, mime) {
+      return `data:${mime};base64,${toBase64(bytes)}`
+    }
+
+    /** 从 CSS 里抽出所有相对 url() 与 @import 引用，给调用方逐个解析。 */
+    const CSS_URL_RE = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi
+    const CSS_IMPORT_RE = /@import\s+(?:url\(\s*(['"]?)([^'")]+)\1\s*\)|(['"])([^'"]+)\3)\s*;?/gi
+
     /** 气泡里只显示元素的最后一段名字：#a > .b > span.x → span.x */
     function lastSegment(selector) {
       const text = String(selector || '').trim()
@@ -350,6 +408,7 @@ window.__ModuleLoader__.load({
     /** 头部那句资源说明：内联数、上限、读失败、解码方式。 */
     function assetHint(page) {
       const parts = [T('asset.inner', { n: page.assetCount })]
+      if (page.dataCount) parts.push(T('asset.media', { n: page.dataCount }))
       if (page.assetTotal > page.assetCount) parts.push(T('asset.over', { total: page.assetTotal }))
       if (page.assetFailed && page.assetFailed.length) parts.push(T('asset.failed', { n: page.assetFailed.length }))
       if (page.encoding && page.encoding !== 'utf-8') {
@@ -358,8 +417,98 @@ window.__ModuleLoader__.load({
       return parts.join(' · ')
     }
 
+    /** 把 CSS 里的相对 url() 与 @import 就地解析成 data URL / 内联文本。 */
+    async function inlineCss(cssText, basePath, readers, depth) {
+      if (depth > 3) return cssText
+      let out = ''
+      let last = 0
+      // 递归处理 @import 时必须用局部正则：共用一个全局正则会让 lastIndex 互相踩踏，死循环
+      const importRe = new RegExp(CSS_IMPORT_RE.source, 'gi')
+      let match
+      while ((match = importRe.exec(cssText))) {
+        out += cssText.slice(last, match.index)
+        const ref = String(match[2] || match[4] || '').trim()
+        if (!isLocalRef(ref)) {
+          out += match[0]
+        } else {
+          try {
+            const imported = await readers.readCss(ref, basePath)
+            const nested = await inlineCss(imported.text, imported.absolutePath, readers, depth + 1)
+            out += nested
+          } catch (error) {
+            readers.stats.failed.push(ref + '：' + (error && error.message ? error.message : error))
+            out += match[0]
+          }
+        }
+        last = match.index + match[0].length
+      }
+      out += cssText.slice(last)
+
+      const wanted = []
+      const urlScanRe = new RegExp(CSS_URL_RE.source, 'gi')
+      out.replace(urlScanRe, (all, quote, ref) => {
+        if (isLocalRef(ref) && mimeOf(ref)) wanted.push(String(ref).trim())
+        return all
+      })
+      if (wanted.length) {
+        const resolved = new Map()
+        for (const ref of Array.from(new Set(wanted))) {
+          try {
+            const dataUrl = await readers.readDataUrl(ref, basePath)
+            if (dataUrl) resolved.set(ref, dataUrl)
+          } catch (error) {
+            readers.stats.failed.push(ref + '：' + (error && error.message ? error.message : error))
+          }
+        }
+        const urlSwapRe = new RegExp(CSS_URL_RE.source, 'gi')
+        out = out.replace(urlSwapRe, (all, quote, ref) => {
+          const dataUrl = resolved.get(String(ref).trim())
+          return dataUrl ? `url("${dataUrl}")` : all
+        })
+      }
+      return out
+    }
+
+    /** 把 <img>/<source>/<video poster> 的相对引用换成 data URL；srcset 逐个换。 */
+    async function inlineHtmlMedia(doc, basePath, readers) {
+      const swap = async (el, attr) => {
+        const ref = el.getAttribute(attr)
+        if (!isLocalRef(ref) || !mimeOf(ref)) return
+        try {
+          const dataUrl = await readers.readDataUrl(ref, basePath)
+          if (dataUrl) el.setAttribute(attr, dataUrl)
+        } catch (error) {
+          readers.stats.failed.push(ref + '：' + (error && error.message ? error.message : error))
+        }
+      }
+      for (const el of Array.from(doc.querySelectorAll('img[src],source[src]'))) await swap(el, 'src')
+      for (const el of Array.from(doc.querySelectorAll('video[poster]'))) await swap(el, 'poster')
+      for (const el of Array.from(doc.querySelectorAll('[srcset]'))) {
+        const items = String(el.getAttribute('srcset') || '').split(',')
+        const parts = []
+        let changed = false
+        for (const item of items) {
+          const [ref, descriptor] = item.trim().split(/\s+/, 2)
+          if (ref && isLocalRef(ref) && mimeOf(ref)) {
+            try {
+              const dataUrl = await readers.readDataUrl(ref, basePath)
+              if (dataUrl) {
+                parts.push(descriptor ? dataUrl + ' ' + descriptor : dataUrl)
+                changed = true
+                continue
+              }
+            } catch (error) {
+              readers.stats.failed.push(ref + '：' + (error && error.message ? error.message : error))
+            }
+          }
+          if (ref) parts.push(descriptor ? ref + ' ' + descriptor : ref)
+        }
+        if (changed) el.setAttribute('srcset', parts.join(', '))
+      }
+    }
+
     /** 把引用的 css/js 内联进文档，并注入桥脚本。 */
-    function buildDocument(html, assets) {
+    async function buildDocument(html, assets, readers) {
       const doc = new DOMParser().parseFromString(html, 'text/html')
       const byRef = new Map(assets.map((asset) => [asset.ref, asset]))
 
@@ -374,7 +523,7 @@ window.__ModuleLoader__.load({
             for (const name of ['media', 'type', 'title', 'disabled']) {
               if (el.hasAttribute(name)) style.setAttribute(name, el.getAttribute(name))
             }
-            style.textContent = asset.text
+            style.textContent = await inlineCss(asset.text, asset.absolutePath, readers, 0)
             el.replaceWith(style)
           } else {
             const script = doc.createElement('script')
@@ -387,6 +536,8 @@ window.__ModuleLoader__.load({
           }
         }
       }
+
+      await inlineHtmlMedia(doc, readers.basePath, readers)
 
       // 页面里有 module 脚本（含它自己的内联脚本）就提示用户预览能力不完整
       let hasModule = false
@@ -1405,7 +1556,7 @@ window.__ModuleLoader__.load({
                 if (!/^\/+/.test(ref.path)) throw firstError
                 asset = await readText(remote, parsed.sessionId, ref.path.replace(/^\/+/, ''), { baseFile: main.absolutePath }, signal)
               }
-              assets.push({ ref: ref.ref, kind: ref.kind, text: asset.text })
+              assets.push({ ref: ref.ref, kind: ref.kind, text: asset.text, absolutePath: asset.absolutePath })
             } catch (readError) {
               // 单个资源读不到时照常显示页面主体，但要把失败记下来告诉用户
               failed.push(signal && signal.aborted ? ref.ref : ref.ref + '：' + (readError && readError.message ? readError.message : readError))
@@ -1415,10 +1566,46 @@ window.__ModuleLoader__.load({
             setLoading(false)
             return
           }
-          const built = buildDocument(main.text, assets)
+          const stats = { count: 0, bytes: 0, failed: [] }
+          const readers = {
+            basePath: main.absolutePath,
+            stats,
+            /** 按页面文件解析相对 css；站点根写法（/css/x.css）允许退回相对目录再试一次。 */
+            readCss: async (ref, basePath) => {
+              const path = assetPath(ref)
+              try {
+                return await readText(remote, parsed.sessionId, path, { baseFile: basePath }, signal)
+              } catch (error) {
+                if (!/^\/+/.test(path)) throw error
+                return readText(remote, parsed.sessionId, path.replace(/^\/+/, ''), { baseFile: basePath }, signal)
+              }
+            },
+            /** 图片/字体转 data URL：单个超限、总量超限或类型不认识时返回空串跳过。 */
+            readDataUrl: async (ref, basePath) => {
+              const mime = mimeOf(ref)
+              if (!mime) return ''
+              if (stats.count >= MAX_DATA_ASSETS || stats.bytes >= MAX_DATA_TOTAL) return ''
+              const path = assetPath(ref)
+              let read
+              try {
+                read = await readBinary(remote, parsed.sessionId, path, { baseFile: basePath }, signal)
+              } catch (error) {
+                if (!/^\/+/.test(path)) throw error
+                read = await readBinary(remote, parsed.sessionId, path.replace(/^\/+/, ''), { baseFile: basePath }, signal)
+              }
+              if (read.bytes.length === 0 || read.bytes.length > MAX_DATA_BYTES) return ''
+              if (stats.bytes + read.bytes.length > MAX_DATA_TOTAL) return ''
+              stats.count += 1
+              stats.bytes += read.bytes.length
+              return toDataUrl(read.bytes, mime)
+            },
+          }
+          const built = await buildDocument(main.text, assets, readers)
+          if (stats.failed.length) failed.push(...stats.failed)
           const next = {
             built: built.html,
             hasModule: built.hasModule,
+            dataCount: stats.count,
             absolutePath: main.absolutePath,
             version: main.version,
             filePath: parsed.path,
@@ -2061,7 +2248,7 @@ window.__ModuleLoader__.load({
       // 给离线测试用的出口：浏览器里没有任何调用方，也不会挂到全局
       // 自测出口只在跑单测时挂出来，发布物里不留
       ...(typeof process !== 'undefined' && process.env && process.env.HA_SELFTEST === '1'
-        ? { __test: { parseFileAddress, normalizeUpstream, composeMessage, decodeText, assetPath, cleanText, cleanRect, cleanSelector, cleanTag, assetHint, decideUpstream, draftOccupied, lastSegment, findAnnotationFor, pendingAnnotations, mergeDraft, MESSAGES, T } }
+        ? { __test: { parseFileAddress, normalizeUpstream, composeMessage, decodeText, assetPath, cleanText, cleanRect, cleanSelector, cleanTag, assetHint, decideUpstream, draftOccupied, lastSegment, findAnnotationFor, pendingAnnotations, mergeDraft, mimeOf, toDataUrl, inlineCss, MESSAGES, T } }
         : {}),
       apply(ctx) {
         // tab 类型只用 sidebarRightTabs；远端读取能力单独等，缺了 tab 也照样出现并给出错误提示。

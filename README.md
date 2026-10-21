@@ -52,8 +52,11 @@ dsh plugin add ./dsh-html-annotate-0.1.0.tgz
 
 ## 已知限制
 
-- 只内联同目录的相对 `.css` 与经典 `<script src>`，最多 24 个资源；ES module、`fetch`、
-  CSS `url()` / `@import`、相对图片和字体不走 Host。用到 `type="module"` 的页面会出现一条提示。
+- 只内联同目录的相对 `.css` 与经典 `<script src>`，最多 24 个；CSS 里的相对 `url()` 与 `@import` 会被展开。
+- 相对图片与字体（png/jpg/jpeg/gif/webp/avif/svg/ico/bmp/woff/woff2/ttf/otf/eot）会转成 data URL 内联：
+  单个 ≤ 4 MiB、总量 ≤ 12 MiB、最多 32 个。超出或读不到的保持原样，顶栏会显示数量。
+- 外链资源（`http(s):`、`//cdn`）不读；预览的 CSP 只允许 `data:`/`blob:` 的图片与字体，所以外链图片不会显示。
+- `fetch` / XHR、ES module 的 `import` 不走 Host。用到 `type="module"` 的页面会出现一条提示。
 - 变更流（`remote.workspaceFiles.changes`）尽力而为，不可用时自动退回带退避的轮询。
 - 不做截图，只把元素结构、文字和当前样式发给 AI。
 - 只认会话内的文件地址；`absolute/` 这种没绑会话的地址交给内置预览。
@@ -66,7 +69,7 @@ node --test test/
 ```
 
 `test/client.test.cjs` 在 Node 里加载 `client.js` 的 factory，只测纯函数：地址解析、上行清洗与限速、
-`composeMessage` 文本、字符集解码（含 BOM / UTF-16）、资源提示、草稿占用与复用判定。UI 路径需要人工验。
+`composeMessage` 文本、字符集解码（含 BOM / UTF-16）、资源提示、CSS 里的引用内联、草稿占用与复用判定。UI 路径需要人工验。
 
 ## 兼容
 
@@ -75,7 +78,7 @@ node --test test/
 
 ## 界面语言
 
-界面文案注册在 locale 命名空间 `html-annotate` 下，zh / en 各 73 个键。tab 正文走框架注入的 `t`，
+界面文案注册在 locale 命名空间 `html-annotate` 下，zh / en 各 74 个键。tab 正文走框架注入的 `t`，
 其余提示走本地字典回退；字典在 `inner.inject(['locale'])` 里注册，locale 服务晚就绪也不会漏。
 
 ## 许可证
